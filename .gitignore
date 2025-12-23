@@ -1,0 +1,5 @@
+venv/
+models/
+neuralnet/
+__pycache__/
+
