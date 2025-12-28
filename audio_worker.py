@@ -31,6 +31,7 @@ class AudioWorker(QThread):
     wake_signal = pyqtSignal(float)
     cmd_signal = pyqtSignal(str, float)
     enrollment_finished_signal = pyqtSignal()
+    review_request_signal = pyqtSignal()
     
     def __init__(self, wake_model_path, cmd_model_path, args, device, wake_arch='matchboxnet', cmd_arch='resnet14'):        
         super().__init__()
@@ -68,11 +69,13 @@ class AudioWorker(QThread):
         self.audio_window = np.zeros(self.window_size, dtype=np.float32)
         self.is_awake = False
         self.awake_timer = 0
-        
+
         self.enrollment_samples = []
-        self.enrollment_state = "WAIT_FOR_SILENCE"
-        self.silence_timer = 0
-        self.rec_buffer = []
+        self.enrollment_state = "IDLE" 
+        self.rec_buffer_emb = []    
+        self.temp_raw_audio = None  
+        self.temp_mean_emb = None   
+        self.manual_rec_counter = 0
 
     def _load_full_model(self, path, arch, num_classes):
         if not path: return None
@@ -166,7 +169,7 @@ class AudioWorker(QThread):
                     rms = get_rms(self.audio_window)
 
                     if self.mode == "enrollment":
-                        self._logic_enrollment(rms)
+                        self._logic_enrollment()
                     else:
                         self._logic_inference(rms)
                         
@@ -226,67 +229,59 @@ class AudioWorker(QThread):
                     self.audio_window[:] = 0
                     time.sleep(1.0)
 
-    def _trigger_wake(self, score):
-        self.is_awake = True
-        self.awake_timer = time.time()
-        self.wake_signal.emit(score)
-        self.status_signal.emit(f"SŁUCHAM! ({score:.2f})")
-        self.audio_window[:] = 0
-        time.sleep(0.2)
-
-    def start_enrollment(self):
-        self.enrollment_samples = []
+    def start_manual_recording(self):
         self.mode = "enrollment"
-        self.enrollment_state = "WAIT_FOR_SILENCE"
-        self.status_signal.emit("Cisza...")
-        time.sleep(0.5)
-
-    def _logic_enrollment(self, rms):
-        current_time = time.time()
-        
-        if self.enrollment_state == "WAIT_FOR_SILENCE":
-            if rms < 0.01: 
-                if current_time - self.silence_timer > 0.5: 
-                    self.enrollment_state = "WAIT_FOR_VOICE"
-                    self.status_signal.emit(f"Mów teraz ({len(self.enrollment_samples)}/10)")
-            else:
-                self.silence_timer = current_time 
-                self.status_signal.emit("Proszę o ciszę...")
-
-        elif self.enrollment_state == "WAIT_FOR_VOICE":
-            if rms > 0.02: 
-                self.enrollment_state = "RECORDING"
-                self.rec_buffer = [] 
-                self.status_signal.emit("Nagrywam...")
-
-        elif self.enrollment_state == "RECORDING":
+        self.enrollment_state = "RECORDING"
+        self.rec_buffer_emb = []
+        self.manual_rec_counter = 0
+        self.status_signal.emit("Nagrywam")
+        self.audio_window[:] = 0
+    
+    def _logic_enrollment(self, new_data):
+        if self.enrollment_state == "RECORDING":
             mfcc = self.get_mfcc_tensor(self.audio_window)
             emb = self.get_embedding(mfcc)
-            self.rec_buffer.append(emb)
-            
-            if len(self.rec_buffer) >= 8: 
-                stack = torch.cat(self.rec_buffer, dim=0)
-                mean = torch.mean(stack, dim=0, keepdim=True)
-                
-                self.enrollment_samples.append(mean)
-                
-                progress = len(self.enrollment_samples) * 10
-                self.progress_signal.emit(progress)
-                self.log_signal.emit(f"Złapano próbkę {len(self.enrollment_samples)}")
-                
-                self.enrollment_state = "COOLDOWN"
-                self.silence_timer = current_time
+            self.rec_buffer_emb.append(emb)
 
-        elif self.enrollment_state == "COOLDOWN":
-            if current_time - self.silence_timer > 1.2: 
-                if len(self.enrollment_samples) >= 10:
-                    self._finalize_enrollment()
-                else:
-                    self.enrollment_state = "WAIT_FOR_SILENCE"
-                    self.silence_timer = current_time 
+            self.manual_rec_counter += 1
+
+            if self.manual_rec_counter >= 12:
+                stack = torch.cat(self.rec_buffer_emb, dim=0)
+                self.temp_mean_emb = torch.mean(stack, dim=0, keepdim=True)
+                
+                self.temp_raw_audio = self.audio_window.copy()
+                
+                self.enrollment_state = "WAIT_FOR_DECISION"
+                self.status_signal.emit("Odsłuchaj i zatwierdź.")
+                self.review_request_signal.emit()
+            elif self.enrollment_state == "WAIT_FOR_DECISION":
+                pass
+    
+    def play_recording(self):
+        if self.temp_raw_audio is not None:
+            sd.play(self.temp_raw_audio, self.sample_rate)
+    
+    def accept_recording(self):
+        if self.temp_mean_emb is not None:
+            self.enrollment_samples.append(self.temp_mean_emb)
+            count = len(self.enrollment_samples)
+
+            self.progress_signal.emit(count*10)
+            self.log_signal.emit(f"Zatwierdzono próbkę {count}/10")
+
+            if count >= 10:
+                self._finalize_enrollment()
             else:
-                self.status_signal.emit(f"Zapisano {len(self.enrollment_samples)}/10...")
-
+                self.enrollment_state = "IDLE"
+                self.status_signal.emit(f"Gotowe ({count}/10). Kliknij 'Nagraj")
+                self.enrollment_finished_signal.emit()
+    
+    def discard_recording(self):
+        self.log_signal.emit("Odrzucono próbkę")
+        self.enrollment_state = "IDLE"
+        self.status_signal.emit("Spróbuj ponownie")
+        self.enrollment_finished_signal.emit()
+    
     def _finalize_enrollment(self):
         stacked = torch.cat(self.enrollment_samples, dim=0)
         mean_emb = torch.mean(stacked, dim=0, keepdim=True)
@@ -297,5 +292,7 @@ class AudioWorker(QThread):
         self.log_signal.emit("Przełączono na custom Wake Word.")
         
         self.mode = "listening"
+        self.enrollment_state = "IDLE"
+        self.enrollment_samples = [] 
         self.enrollment_finished_signal.emit()
-        self.status_signal.emit("Gotowe.")
+        self.status_signal.emit("Zapisano nowy wzorzec.")
