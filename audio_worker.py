@@ -19,7 +19,7 @@ from neuralnet.MatchboxNet import MatchboxNet
 from neuralnet.Resnet import ResNet8, ResNet14
 from neuralnet.CRNN import CRNN
 
-COMMANDS = ['Ciemniej', 'Jasniej', 'Muzyka', 'Rolety', 'Swiatlo', 'Telewizor', 'Wrocilem', 'Wychodze', 'Tlo']
+COMMANDS = ['Ciemniej', 'Jaśniej', 'Muzyka', 'Rolety', 'Światło', 'Telewizor', 'Wróciłem', 'Wychodzę', 'Tlo']
 
 def get_rms(audio_chunk):
     return np.sqrt(np.mean(audio_chunk**2)) + 1e-7
@@ -33,7 +33,7 @@ class AudioWorker(QThread):
     enrollment_finished_signal = pyqtSignal()
     review_request_signal = pyqtSignal()
     
-    def __init__(self, wake_model_path, cmd_model_path, args, device, wake_arch='matchboxnet', cmd_arch='resnet14'):        
+    def __init__(self, wake_model_path, cmd_model_path, args, device, wake_arch='matchboxnet', cmd_arch='matchboxnet'):        
         super().__init__()
         self.wake_model_path = wake_model_path
         self.cmd_model_path = cmd_model_path
@@ -63,6 +63,7 @@ class AudioWorker(QThread):
         
         self.custom_wake_path = "custom_wake.pt"
         self.reference_embedding = None
+        self.negative_embedding = None
         self.use_custom_wake = False
         self._check_wake_mode() 
 
@@ -135,7 +136,13 @@ class AudioWorker(QThread):
     def _check_wake_mode(self):
         if os.path.exists(self.custom_wake_path):
             try:
-                self.reference_embedding = torch.load(self.custom_wake_path, map_location=self.device)
+                data = torch.load(self.custom_wake_path, map_location=self.device)
+                if isinstance(data, dict):
+                    self.reference_embedding = data['positive']
+                    self.negative_embedding = data.get('negative')
+                else:
+                    self.reference_embedding = data
+                    self.negative_embedding = None
                 self.use_custom_wake = True
                 self.log_signal.emit("Tryb custom wake word")
             except:
@@ -170,8 +177,10 @@ class AudioWorker(QThread):
 
                     if self.mode == "enrollment":
                         self._logic_enrollment()
+                    elif self.mode == "background_enrollment":
+                        self._logic_background()
                     else:
-                        self._logic_inference(rms)
+                        self._inference(rms)
                         
                 except queue.Empty:
                     pass
@@ -189,10 +198,15 @@ class AudioWorker(QThread):
                 emb = self.get_embedding(mfcc)
                 norm_emb = torch.nn.functional.normalize(emb, p=2, dim=1)
                 if self.reference_embedding is not None:
-                    score = torch.nn.functional.cosine_similarity(norm_emb, self.reference_embedding)
-                    if score.item() > 0.85:
-                        self._trigger_wake(score.item())
-                    
+                    score_pos = torch.nn.functional.cosine_similarity(norm_emb, self.reference_embedding)
+                
+                if self.negative_embedding is not None:
+                    score_neg = torch.nn.functional.cosine_similarity(norm_emb, self.negative_embedding)
+                    if score_pos.item() > 0.85 and score_pos.item() > (score_neg.item()+0.1):
+                        self._trigger_wake(score_pos.item())
+                    else:
+                        if score_pos.item() > 0.85:
+                            self._trigger_wake(score_pos.item())
             else:
                 if self.wake_model_net is not None:
                     if mfcc.ndim == 2: mfcc = mfcc.unsqueeze(0)
@@ -237,26 +251,39 @@ class AudioWorker(QThread):
         self.status_signal.emit("Nagrywam")
         self.audio_window[:] = 0
     
-    def _logic_enrollment(self, new_data):
-        if self.enrollment_state == "RECORDING":
-            mfcc = self.get_mfcc_tensor(self.audio_window)
-            emb = self.get_embedding(mfcc)
-            self.rec_buffer_emb.append(emb)
+    def _logic_enrollment(self):
+        try:
+            if self.enrollment_state == "RECORDING":
+                mfcc = self.get_mfcc_tensor(self.audio_window)
+                emb = self.get_embedding(mfcc)
+                self.rec_buffer_emb.append(emb)
 
-            self.manual_rec_counter += 1
+                self.manual_rec_counter += 1
 
-            if self.manual_rec_counter >= 12:
-                stack = torch.cat(self.rec_buffer_emb, dim=0)
-                self.temp_mean_emb = torch.mean(stack, dim=0, keepdim=True)
-                
-                self.temp_raw_audio = self.audio_window.copy()
-                
-                self.enrollment_state = "WAIT_FOR_DECISION"
-                self.status_signal.emit("Odsłuchaj i zatwierdź.")
-                self.review_request_signal.emit()
-            elif self.enrollment_state == "WAIT_FOR_DECISION":
-                pass
-    
+                if self.manual_rec_counter >= 12:
+                    stack = torch.cat(self.rec_buffer_emb, dim=0)
+                    self.temp_mean_emb = torch.mean(stack, dim=0, keepdim=True)
+                    
+                    self.temp_raw_audio = self.audio_window.copy()
+                    
+                    self.enrollment_state = "WAIT_FOR_DECISION"
+                    self.status_signal.emit("Odsłuchaj i zatwierdź.")
+                    self.review_request_signal.emit()
+                elif self.enrollment_state == "WAIT_FOR_DECISION":
+                    pass
+        except Exception as e:
+            self.log_signal.emit(f"Enrollment error: {e}")
+            self.enrollment_state = "IDLE"
+            self.mode = "listening"
+
+    def _trigger_wake(self, score):
+        self.is_awake = True
+        self.awake_timer = time.time()
+        self.wake_signal.emit(score)
+        self.status_signal.emit(f"SŁUCHAM! ({score:.2f})")
+        self.audio_window[:] = 0
+        time.sleep(0.2)    
+        
     def play_recording(self):
         if self.temp_raw_audio is not None:
             sd.play(self.temp_raw_audio, self.sample_rate)
@@ -282,11 +309,40 @@ class AudioWorker(QThread):
         self.status_signal.emit("Spróbuj ponownie")
         self.enrollment_finished_signal.emit()
     
+    def _logic_background(self):
+        try:
+            mfcc = self.get_mfcc_tensor(self.audio_window)
+            emb = self.get_embedding(mfcc)
+            self.rec_buffer_emb.append(emb)
+
+            self.manual_rec_counter += 1
+            
+            target_blocks = 80 
+            progress = int((self.manual_rec_counter / target_blocks) * 100)
+            self.progress_signal.emit(progress)
+
+            if self.manual_rec_counter >= target_blocks:
+                self._finalize_background()
+                
+        except Exception as e:
+            self.log_signal.emit(f"Background enrollment error: {e}")
+            self.mode = "listening"
+
+    def record_background_noise(self):
+            self.mode = "background_enrollment"
+            self.rec_buffer_emb = [] 
+            self.manual_rec_counter = 0 
+            self.status_signal.emit("CZYTAJ TEKST...")
+
     def _finalize_enrollment(self):
         stacked = torch.cat(self.enrollment_samples, dim=0)
         mean_emb = torch.mean(stacked, dim=0, keepdim=True)
         self.reference_embedding = torch.nn.functional.normalize(mean_emb, p=2, dim=1)
-        torch.save(self.reference_embedding, self.custom_wake_path)
+        data_to_save = {
+            'positive': self.reference_embedding,
+            'negative': self.negative_embedding
+        }
+        torch.save(data_to_save, self.custom_wake_path)
         
         self.use_custom_wake = True 
         self.log_signal.emit("Przełączono na custom Wake Word.")

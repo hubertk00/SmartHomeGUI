@@ -2,9 +2,9 @@ import copy
 
 class SmartHomeState:
     def __init__(self):
-        self.devices = {'Telewizor': False, 'Ciemniej': False, 'Jasniej': False, 
-                        'Swiatlo': False, 'Muzyka': False, 'Rolety': False, 
-                        'Wychodze': False, 'Wrocilem': False}
+        self.devices = {'Telewizor': False, 'Ciemniej': False, 'Jaśniej': False, 
+                        'Światło': False, 'Muzyka': False, 'Rolety': False, 
+                        'Wychodzę': False, 'Wróciłem': False}
         self.saved_state = None
 
     def toggle(self, name):

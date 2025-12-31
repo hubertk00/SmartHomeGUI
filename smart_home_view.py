@@ -1,8 +1,9 @@
 import sys
 import torch
 from PyQt5.QtWidgets import (QApplication, QWidget, QGridLayout, QVBoxLayout, 
-                             QLabel, QFrame, QPushButton, QProgressBar, QHBoxLayout)
-from PyQt5.QtCore import pyqtSlot, Qt, QTimer
+                             QLabel, QFrame, QPushButton, QProgressBar, QHBoxLayout, QSizePolicy,
+                             QListWidget, QListWidgetItem)
+from PyQt5.QtCore import pyqtSlot, Qt, QTimer, QTime, QDate
 from PyQt5.QtGui import QFont
 
 from smart_home_model import SmartHomeState
@@ -24,9 +25,10 @@ class DeviceTile(QFrame):
     def __init__(self, name):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
-        self.setFixedSize(150, 100)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumSize(150, 100)      
+        self.setMaximumHeight(300)  
         self.setStyleSheet("background-color: #333; border-radius: 8px;")
-        
         layout = QVBoxLayout()
         self.lbl_name = QLabel(name)
         self.lbl_name.setAlignment(Qt.AlignCenter)
@@ -40,44 +42,124 @@ class DeviceTile(QFrame):
         layout.addWidget(self.lbl_status)
         self.setLayout(layout)
 
-    def update_style(self, is_on):
+    def update_style(self, is_on, brightness=100):
         if is_on:
-            self.setStyleSheet("background-color: #2e7d32; border-radius: 8px;") 
-            self.lbl_status.setText("ON")
+            factor = max(0.2, brightness/100.0)
+            r = int(46 * factor)
+            g = int(125 * factor)
+            b = int(50 * factor)
+            self.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); border-radius: 8px;")
+            if brightness < 100:
+                self.lbl_status.setText(f"ON ({brightness}%)")
+            else:
+                self.lbl_status.setText("ON")
             self.lbl_status.setStyleSheet("color: white;")
         else:
             self.setStyleSheet("background-color: #333; border-radius: 8px;") 
             self.lbl_status.setText("OFF")
             self.lbl_status.setStyleSheet("color: #777;")
 
+class InfoPanel(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet("background-color: transparent;") 
+        
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        
+        self.lbl_time = QLabel("00:00")
+        self.lbl_time.setAlignment(Qt.AlignCenter)
+        self.lbl_time.setStyleSheet("font-size: 60px; font-weight: bold; color: #eeeeee; font-family: 'Segoe UI', sans-serif;")
+        
+        self.lbl_date = QLabel("Poniedziałek, 1 Stycznia")
+        self.lbl_date.setAlignment(Qt.AlignCenter)
+        self.lbl_date.setStyleSheet("font-size: 18px; color: #aaaaaa; margin-bottom: 20px;")
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_time)
+        self.timer.start(1000)
+        self.update_time() 
+        
+        self.log_list = QListWidget()
+        self.log_list.setFocusPolicy(Qt.NoFocus)
+        self.log_list.setStyleSheet("""
+            QListWidget {
+                background-color: rgba(0, 0, 0, 0.3); 
+                border-radius: 10px; 
+                border: 1px solid #333;
+                color: #03a9f4;
+                font-size: 14px;
+            }
+            QListWidget::item {
+                padding: 5px;
+                border-bottom: 1px solid #222;
+            }
+        """)
+        self.log_list.setMaximumHeight(200)
+        self.log_list.setMaximumWidth(600)  
+        
+        layout.addWidget(self.lbl_time)
+        layout.addWidget(self.lbl_date)
+        layout.addWidget(self.log_list)
+        
+        self.setLayout(layout)
+
+    def update_time(self):
+        current_time = QTime.currentTime().toString("HH:mm")
+        current_date = QDate.currentDate().toString("dddd, d MMMM yyyy") 
+        self.lbl_time.setText(current_time)
+        self.lbl_date.setText(current_date)
+
+    def add_log(self, text):
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        item = QListWidgetItem(f"[{timestamp}] {text}")
+        item.setTextAlignment(Qt.AlignCenter)
+        self.log_list.insertItem(0, item)
+        
+        if self.log_list.count() > 5:
+            self.log_list.takeItem(5)
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Smart Home RPi Controller")
-        self.resize(800, 500)
         self.setStyleSheet("background-color: #121212; color: white;")
-
+        self.resize(1200, 800)        
         self.logic = SmartHomeState()
         
         self.main_layout = QVBoxLayout()
         
         self.grid_layout = QGridLayout()
         self.tiles = {} 
+        
+        self.light_brightness = 100
 
+        columns = 4
         row, col = 0, 0
-        for name in self.logic.devices:
+
+        excluded_commands = ["Wróciłem", "Wychodzę", "Jaśniej", "Ciemniej"]
+        valid_devices = [name for name in self.logic.devices if name not in excluded_commands]
+        total = len(valid_devices)
+
+        for i, name in enumerate(valid_devices):
             tile = DeviceTile(name)
-            self.grid_layout.addWidget(tile, row, col)
             self.tiles[name] = tile
-            
+            self.grid_layout.addWidget(tile, row, col)
             col += 1
-            if col > 2:
+            if col >= columns:
                 col = 0
                 row += 1
-        
+            
         self.main_layout.addLayout(self.grid_layout)
         self.main_layout.addSpacing(20)
 
+        self.main_layout.addStretch(1) 
+        
+        self.info_panel = InfoPanel()
+        self.main_layout.addWidget(self.info_panel, alignment=Qt.AlignCenter)
+        
+        self.main_layout.addStretch(1)
         controls_panel = QFrame()
         controls_panel.setStyleSheet("background-color: #1e1e1e; border-radius: 10px; padding: 10px;")
         controls_layout = QVBoxLayout(controls_panel)
@@ -134,8 +216,8 @@ class MainWindow(QWidget):
         args = SystemArgs()
         device = torch.device("cpu") 
 
-        wake_path = "models/wake_model.pth"
-        cmd_path = "models/cmd_model.pth"
+        wake_path = r"models\matchboxnet_wakeword.pth"
+        cmd_path = r"models\matchboxnet_commands.pth"
 
         self.worker = AudioWorker(
             wake_model_path=wake_path, 
@@ -143,7 +225,7 @@ class MainWindow(QWidget):
             args=args, 
             device=device,
             wake_arch='matchboxnet',
-            cmd_arch='resnet14'
+            cmd_arch='matchboxnet'
         )
         
         self.worker.cmd_signal.connect(self.process_voice_command)
@@ -158,15 +240,27 @@ class MainWindow(QWidget):
     @pyqtSlot(str, float)
     def process_voice_command(self, command_name, probability):
         print(f"Komenda: {command_name} ({probability:.2f})")
-        
-        if command_name == "Wychodze":
-            self.logic.save_snapshot()
+        self.info_panel.add_log(f"Rozpoznano: {command_name} ({int(probability*100)}%)")
+
+        if command_name == "Wychodzę":
+            self.logic.save()
             self.logic.set_all(False)
             self.refresh_all_tiles()
 
-        elif command_name == "Wrocilem":
-            if self.logic.restore_snapshot():
+        elif command_name == "Wróciłem":
+            if self.logic.restore():
                 self.refresh_all_tiles()
+        elif command_name == "Jaśniej":
+            if "Światło" in self.tiles:
+                self.light_brightness = min(100, self.light_brightness + 20) 
+                if self.logic.devices.get("Światło"):
+                    self.tiles["Światło"].update_style(True, self.light_brightness)
+                
+        elif command_name == "Ciemniej":
+            if "Światło" in self.tiles:
+                self.light_brightness = max(20, self.light_brightness - 20) 
+                if self.logic.devices.get("Światło"):
+                    self.tiles["Światło"].update_style(True, self.light_brightness)
         
         elif command_name in self.logic.devices:
             new_state = self.logic.toggle(command_name)
@@ -175,7 +269,10 @@ class MainWindow(QWidget):
     def refresh_all_tiles(self):
         for name, state in self.logic.devices.items():
             if name in self.tiles:
-                self.tiles[name].update_style(state)
+                if name == "Światło":
+                    self.tiles[name].update_style(state, self.light_brightness)
+                else:
+                    self.tiles[name].update_style(state, 100)
 
     def on_record_click(self):
         self.btn_record.setEnabled(False)
@@ -202,5 +299,5 @@ class MainWindow(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec_())
