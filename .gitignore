@@ -2,4 +2,4 @@ venv/
 models/
 neuralnet/
 __pycache__/
-
+*.pt

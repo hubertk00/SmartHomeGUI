@@ -32,7 +32,8 @@ class AudioWorker(QThread):
     cmd_signal = pyqtSignal(str, float)
     enrollment_finished_signal = pyqtSignal()
     review_request_signal = pyqtSignal()
-    
+    enrollment_phase1_finished_signal = pyqtSignal()
+
     def __init__(self, wake_model_path, cmd_model_path, args, device, wake_arch='matchboxnet', cmd_arch='matchboxnet'):        
         super().__init__()
         self.wake_model_path = wake_model_path
@@ -297,7 +298,13 @@ class AudioWorker(QThread):
             self.log_signal.emit(f"Zatwierdzono próbkę {count}/10")
 
             if count >= 10:
-                self._finalize_enrollment()
+                self.enrollment_state = "PHASE_1_COMPLETE"
+                stacked = torch.cat(self.enrollment_samples, dim=0)
+                mean_emb = torch.mean(stacked, dim=0, keepdim=True)
+                self.temp_positive_embedding = torch.nn.functional.normalize(mean_emb, p=2, dim=1)
+                
+                self.status_signal.emit("Etap 1 zakończony.")
+                self.enrollment_phase1_finished_signal.emit()            
             else:
                 self.enrollment_state = "IDLE"
                 self.status_signal.emit(f"Gotowe ({count}/10). Kliknij 'Nagraj")
@@ -351,4 +358,48 @@ class AudioWorker(QThread):
         self.enrollment_state = "IDLE"
         self.enrollment_samples = [] 
         self.enrollment_finished_signal.emit()
-        self.status_signal.emit("Zapisano nowy wzorzec.")
+        self.status_signal.emit("Zapisano nowy wzorzec.")        
+
+    def _finalize_background(self):
+        try:
+            if not self.rec_buffer_emb:
+                self.log_signal.emit("Pusty bufor tła")
+                self.mode = "listening"
+                return
+            stacked = torch.cat(self.rec_buffer_emb, dim=0)
+            mean_neg = torch.mean(stacked, dim=0, keepdim=True)
+            self.negative_embedding = torch.nn.functional.normalize(mean_neg, p=2, dim=1)
+            self.reference_embedding = self.temp_positive_embedding
+
+            self._save_to_file()
+
+        except Exception as e:
+            self.log_signal.emit(f"Błąd finalizacji tła: {e}")
+        finally:
+            self._reset_after_enrollment()
+
+    def save_enrollment_without_noise(self):
+        self.reference_embedding = self.temp_positive_embedding
+        self.negative_embedding = None
+        
+        self._save_to_file()
+        self.log_signal.emit("Zapisano wzorzec podstawowy.")
+        self._reset_after_enrollment()
+
+    def _save_to_file(self):
+        data_to_save = {
+            'positive': self.reference_embedding,
+            'negative': self.negative_embedding
+        }
+        torch.save(data_to_save, self.custom_wake_path)
+        self.use_custom_wake = True
+
+    def _reset_after_enrollment(self):
+        self.mode = "listening"
+        self.enrollment_state = "IDLE"
+        self.enrollment_samples = []
+        self.rec_buffer_emb = []
+        self.temp_positive_embedding = None
+        
+        self.enrollment_finished_signal.emit()
+        self.status_signal.emit("Gotowy do pracy.")
