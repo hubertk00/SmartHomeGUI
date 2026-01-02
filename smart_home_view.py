@@ -122,7 +122,7 @@ class DeviceTile(QFrame):
             
             self.setStyleSheet(f"""
                 QFrame {{
-                    background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(99, 102, 241, {opacity}), stop:1 rgba(168, 85, 247, {opacity}));
+                    background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(34, 197, 94, {opacity}), stop:1 rgba(16, 185, 129, {opacity}));
                     border-radius: 20px;
                     border: 1px solid rgba(255, 255, 255, 0.3);
                 }}
@@ -170,7 +170,7 @@ class InfoPanel(QWidget):
         reading_layout.setContentsMargins(40, 40, 40, 40)
         reading_layout.setSpacing(20)
         
-        self.lbl_reading_instruction = QLabel("PRZECZYTAJ GŁOŚNO")
+        self.lbl_reading_instruction = QLabel("PRZECZYTAJ")
         self.lbl_reading_instruction.setAlignment(Qt.AlignCenter)
         self.lbl_reading_instruction.setStyleSheet("color: #4facfe; font-size: 14px; font-weight: 700; letter-spacing: 2px;")
         
